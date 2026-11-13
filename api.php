@@ -278,7 +278,7 @@ if ($action === 'signal' && $method === 'POST') {
     $body = requestBody();
     $type = $body['type'] ?? null;
     $payload = $body['payload'] ?? null;
-    if (!is_string($type) || !in_array($type, ['offer', 'answer', 'candidate'], true) || !is_array($payload)) {
+    if (!is_string($type) || !in_array($type, ['offer', 'answer', 'candidate', 'renegotiate'], true) || !is_array($payload)) {
         respond(400, ['error' => 'Invalid signaling message.']);
     }
     if (in_array($type, ['offer', 'answer'], true)) {
@@ -286,8 +286,10 @@ if ($action === 'signal' && $method === 'POST') {
             respond(400, ['error' => 'Invalid session description.']);
         }
         $payload = ['sdp' => $payload['sdp']];
-    } elseif (!isset($payload['candidate']) || !is_string($payload['candidate']) || strlen($payload['candidate']) > 2048) {
+    } elseif ($type === 'candidate' && (!isset($payload['candidate']) || !is_string($payload['candidate']) || strlen($payload['candidate']) > 2048)) {
         respond(400, ['error' => 'Invalid ICE candidate.']);
+    } elseif ($type === 'renegotiate' && count($payload) !== 0) {
+        respond(400, ['error' => 'Invalid renegotiation request.']);
     }
     $target = $body['to'] ?? null;
     if (!is_string($target) || !preg_match('/^[a-f0-9]{16}$/', $target)) {

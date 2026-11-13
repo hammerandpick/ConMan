@@ -35,8 +35,8 @@
             <p id="entry-error" class="error" role="alert" hidden></p>
         </section>
 
-        <section id="connection" class="card connection-card" hidden>
-            <div class="connection-heading">
+        <section id="connection" class="connection-card" hidden>
+            <div class="connection-heading room-header-layer">
                 <div>
                     <p class="eyebrow">YOUR ROOM</p>
                     <h2 id="room-title">Room</h2>
@@ -44,7 +44,39 @@
                 <button id="open-room-menu" class="button button-secondary" type="button" aria-haspopup="dialog" aria-controls="room-menu">Room menu</button>
             </div>
 
-            <dialog id="room-menu" class="room-menu" aria-labelledby="room-menu-title">
+            <aside class="participant-panel device-layer" aria-label="Devices in this room">
+                <p class="eyebrow">DEVICES IN ROOM</p>
+                <ul id="participant-list" class="participant-list"></ul>
+            </aside>
+
+            <section id="main-table" class="main-table-layer" aria-label="Main table">
+                <p class="eyebrow">MAIN TABLE</p>
+                <p id="connection-status" class="status" role="status" aria-live="polite">Starting connection…</p>
+                <div id="main-table-content" class="main-table-content">
+                    <div id="media-grid" class="media-grid" aria-label="Room video streams"></div>
+                    <p id="main-table-placeholder" class="main-table-placeholder">No cameras are active. This area can show images or shared content.</p>
+                    <img id="main-table-image" class="main-table-image" alt="Shared room content" hidden>
+                </div>
+                <div class="media-controls" aria-label="Your microphone and camera">
+                    <button id="toggle-audio" class="button button-secondary" type="button" aria-pressed="false">Enable microphone</button>
+                    <button id="toggle-video" class="button button-secondary" type="button" aria-pressed="false">Enable camera</button>
+                </div>
+                <p class="media-help">Remote audio is muted until you unmute a device in the list.</p>
+                <div id="audio-playback" class="audio-playback" aria-hidden="true"></div>
+            </section>
+
+            <section class="chat-layer" aria-label="Room chat">
+                <p class="eyebrow">ROOM CHAT</p>
+                <div class="messages" id="messages" aria-live="polite" aria-label="Messages"></div>
+                <form id="message-form" class="message-form">
+                    <label class="sr-only" for="message-input">Message</label>
+                    <input id="message-input" name="message" type="text" maxlength="4000" placeholder="Write a message…" autocomplete="off" disabled required>
+                    <button id="send-message" class="button button-primary" type="submit" disabled>Send</button>
+                </form>
+                <p id="connection-error" class="error" role="alert" hidden></p>
+            </section>
+
+            <dialog id="room-menu" class="room-menu room-menu-layer" aria-labelledby="room-menu-title">
                 <div class="room-menu-heading">
                     <div>
                         <p class="eyebrow">ROOM OPTIONS</p>
@@ -67,22 +99,9 @@
                     </div>
                 </section>
                 <div class="room-menu-actions">
-                    <button id="leave-room" class="button button-danger" type="button">Leave room</button>
+                    <button id="leave-room" class="button button-danger" type="button" title="When clicked the room will be deleted">Close room</button>
                 </div>
             </dialog>
-
-            <p id="connection-status" class="status" role="status" aria-live="polite">Starting connection…</p>
-            <section class="participant-panel" aria-label="Devices in this room">
-                <p class="eyebrow">DEVICES IN ROOM</p>
-                <ul id="participant-list" class="participant-list"></ul>
-            </section>
-            <div class="messages" id="messages" aria-live="polite" aria-label="Messages"></div>
-            <form id="message-form" class="message-form">
-                <label class="sr-only" for="message-input">Message</label>
-                <input id="message-input" name="message" type="text" maxlength="4000" placeholder="Write a message…" autocomplete="off" disabled required>
-                <button id="send-message" class="button button-primary" type="submit" disabled>Send</button>
-            </form>
-            <p id="connection-error" class="error" role="alert" hidden></p>
         </section>
 
         <footer>Up to 6 devices. Each device needs a modern browser and an internet connection.</footer>
