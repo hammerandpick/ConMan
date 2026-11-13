@@ -1,6 +1,6 @@
 # ConMan
 
-ConMan is a small PHP signaling service and browser app for connecting a computer and phones or other devices. A room code pairs up to six browsers in a peer-to-peer mesh; WebRTC carries messages, audio, and video directly between each pair. The PHP server only relays the connection setup messages.
+ConMan, short form of ConnectionManager, is a small PHP signaling service and browser app for connecting a computer and phones or other devices. A room code pairs up to six browsers in a peer-to-peer mesh; WebRTC carries messages, audio, and video directly between each pair. The PHP server only relays the connection setup messages.
 
 ## Requirements
 
