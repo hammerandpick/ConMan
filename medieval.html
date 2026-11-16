@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101827">
+    <title>ConMan — connect your devices</title>
+    <link rel="stylesheet" href="./css/theme-medieval/styles.css">
+    <script src="./js/qr.js" defer></script>
+    <script src="./js/app.js" defer></script>
+</head>
+<body>
+    <main class="shell">
+        <header class="brand">
+            <div class="brand-mark" aria-hidden="true">C</div>
+            <div>
+                <p class="eyebrow">PRIVATE, PEER-TO-PEER</p>
+                <h1>ConMan</h1>
+            </div>
+        </header>
+
+        <section id="welcome" class="card">
+            <p class="eyebrow">CONNECT YOUR DEVICES</p>
+            <h2>Share a connection, not an account.</h2>
+            <p class="intro">Create a room and invite up to five more devices by code or QR. Messages travel directly between every pair.</p>
+            <button id="create-room" class="button button-primary" type="button">Create a room</button>
+            <div class="divider"><span>or join a room</span></div>
+            <form id="join-form" class="join-form">
+                <label for="room-code">Room code</label>
+                <div class="join-controls">
+                    <input id="room-code" name="room-code" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" maxlength="8" placeholder="8-character code" required>
+                    <button class="button button-secondary" type="submit">Join</button>
+                </div>
+            </form>
+            <p id="entry-error" class="error" role="alert" hidden></p>
+        </section>
+
+        <section id="connection" class="connection-card" hidden>
+            <div class="connection-heading room-header-layer">
+                <div>
+                    <p class="eyebrow">YOUR ROOM</p>
+                    <h2 id="room-title">Room</h2>
+                </div>
+                <button id="open-room-menu" class="button button-secondary" type="button" aria-haspopup="dialog" aria-controls="room-menu">Room menu</button>
+            </div>
+
+            <aside class="participant-panel device-layer" aria-label="Devices in this room">
+                <p class="eyebrow">DEVICES IN ROOM</p>
+                <ul id="participant-list" class="participant-list"></ul>
+            </aside>
+
+            <section id="main-table" class="main-table-layer" aria-label="Main table">
+                <p class="eyebrow">MAIN TABLE</p>
+                <p id="connection-status" class="status" role="status" aria-live="polite">Starting connection…</p>
+                <div id="main-table-content" class="main-table-content">
+                    <div id="media-grid" class="media-grid" aria-label="Room video streams"></div>
+                    <p id="main-table-placeholder" class="main-table-placeholder">No cameras are active. This area can show images or shared content.</p>
+                    <img id="main-table-image" class="main-table-image" alt="Shared room content" hidden>
+                </div>
+                <div class="media-controls" aria-label="Your microphone and camera">
+                    <button id="toggle-audio" class="button button-secondary" type="button" aria-pressed="false">Enable microphone</button>
+                    <button id="toggle-video" class="button button-secondary" type="button" aria-pressed="false">Enable camera</button>
+                </div>
+                <p class="media-help">Remote audio is muted until you unmute a device in the list.</p>
+                <div id="audio-playback" class="audio-playback" aria-hidden="true"></div>
+            </section>
+
+            <section class="chat-layer" aria-label="Room chat">
+                <p class="eyebrow">ROOM CHAT</p>
+                <div class="messages" id="messages" aria-live="polite" aria-label="Messages"></div>
+                <form id="message-form" class="message-form">
+                    <label class="sr-only" for="message-input">Message</label>
+                    <input id="message-input" name="message" type="text" maxlength="4000" placeholder="Write a message…" autocomplete="off" disabled required>
+                    <button id="send-message" class="button button-primary" type="submit" disabled>Send</button>
+                </form>
+                <p id="connection-error" class="error" role="alert" hidden></p>
+            </section>
+
+            <dialog id="room-menu" class="room-menu room-menu-layer" aria-labelledby="room-menu-title">
+                <div class="room-menu-heading">
+                    <div>
+                        <p class="eyebrow">ROOM OPTIONS</p>
+                        <h3 id="room-menu-title">Room menu</h3>
+                    </div>
+                    <button id="close-room-menu" class="button button-quiet" type="button">Close</button>
+                </div>
+                <div class="room-code-row">
+                    <span id="room-code-display" class="room-code"></span>
+                    <button id="copy-code" class="button button-secondary" type="button">Copy ID</button>
+                </div>
+                <section class="invite-panel" aria-label="Room QR code">
+                    <canvas id="room-qr" role="img" aria-label="QR code for this room"></canvas>
+                    <div class="invite-details">
+                        <p class="eyebrow">SCAN TO JOIN</p>
+                        <p class="invite-description">Scan this code with your phone camera to open and join the room.</p>
+                        <a id="invite-link" class="invite-link"></a>
+                        <button id="copy-invite-link" class="button button-secondary" type="button">Copy invite link</button>
+                        <p id="invite-warning" class="invite-warning" role="status" hidden></p>
+                    </div>
+                </section>
+                <div class="room-menu-actions">
+                    <button id="leave-room" class="button button-danger" type="button" title="When clicked the room will be deleted">Close room</button>
+                </div>
+            </dialog>
+        </section>
+
+        <footer>Up to 6 devices. Each device needs a modern browser and an internet connection.</footer>
+    </main>
+</body>
+</html>

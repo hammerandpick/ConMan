@@ -50,6 +50,16 @@ function bearerToken(): string
 
 function roomPath(string $code): string
 {
+    /*
+     * The room data is stored in a JSON file named after the room code.
+     * The storage directory is not web-accessible and is created if it does not exist.
+     * 
+     * this function validates the room code and returns the full path to the corresponding JSON file.
+     * If the room code is invalid, it responds with a 400 error.
+     */
+    if(roomCode($code) !== $code) {
+        respond(400, ['error' => 'Invalid room code.']);
+    }
     return __DIR__ . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'rooms' . DIRECTORY_SEPARATOR . $code . '.json';
 }
 
