@@ -21,6 +21,8 @@ const roomCodeDisplay = document.querySelector("#room-code-display");
 const messages = document.querySelector("#messages");
 const messageInput = document.querySelector("#message-input");
 const sendButton = document.querySelector("#send-message");
+const serverStatus = document.querySelector("#server-status");
+const serverButton = document.querySelector("#toggle-server");
 
 const peerConnections = new Map();
 const localTracks = { audio: null, video: null };
@@ -34,6 +36,7 @@ let memberOrder = 0;
 let pollCursor = 0;
 let polling = false;
 let members = new Map();
+let serverId = null;
 let localMediaStream = null;
 let roomEpoch = 0;
 
@@ -99,6 +102,7 @@ function enterRoom(result) {
     memberId = result.memberId;
     memberOrder = result.memberOrder;
     pollCursor = result.cursor;
+    serverId = result.serverId || null;
     members = new Map([[memberId, { id: memberId, order: memberOrder }]]);
     messages.replaceChildren();
     peerConnections.clear();
@@ -114,6 +118,7 @@ function enterRoom(result) {
     document.querySelector(".shell").classList.add("has-room");
     renderMediaTiles();
     renderParticipants();
+    updateServerControls();
     updateMediaControls();
     updateConnectionStatus();
     polling = true;
@@ -159,12 +164,14 @@ function renderParticipants() {
         const status = document.createElement("span");
         const muteButton = document.createElement("button");
         const isCurrentMember = member.id === memberId;
+        const isServer = member.id === serverId;
         const peer = peerConnections.get(member.id);
         const connected = peer && peer.channel && peer.channel.readyState === "open";
 
         details.className = "participant-details";
         label.textContent = isCurrentMember ? `You · Device ${member.order}` : participantLabel(member.id);
-        status.textContent = isCurrentMember ? (memberOrder === 1 ? "Room owner" : "You") : (connected ? "Connected" : "Connecting");
+        const memberStatus = isCurrentMember ? (memberOrder === 1 ? "Room owner" : "You") : (connected ? "Connected" : "Connecting");
+        status.textContent = isServer ? `${memberStatus} · Server` : memberStatus;
         status.className = `participant-status${connected ? " is-connected" : ""}`;
         details.append(label, status);
         muteButton.type = "button";
@@ -185,6 +192,38 @@ function renderParticipants() {
         }
         item.append(details, muteButton);
         participantList.append(item);
+    }
+}
+
+function updateServerControls() {
+    if (!serverId) {
+        serverStatus.textContent = "No Server is selected. Chat is sent directly between devices.";
+    } else if (serverId === memberId) {
+        serverStatus.textContent = "This device is the Server and relays chat to the other devices.";
+    } else {
+        serverStatus.textContent = `${participantLabel(serverId)} is the Server and relays chat.`;
+    }
+    serverButton.textContent = serverId === memberId ? "Stop being Server" : "Make this device the Server";
+    serverButton.disabled = serverId !== null && serverId !== memberId;
+}
+
+async function setServerRole() {
+    const enabled = serverId !== memberId;
+    serverButton.disabled = true;
+    try {
+        const result = await api("server", {
+            method: "POST",
+            query: `&room=${encodeURIComponent(roomCode)}`,
+            body: { enabled }
+        });
+        serverId = result.serverId || null;
+        updateServerControls();
+        renderParticipants();
+        updateConnectionStatus();
+    } catch (error) {
+        showConnectionError(error);
+    } finally {
+        updateServerControls();
     }
 }
 
@@ -416,7 +455,9 @@ function updateConnectionStatus() {
         document.querySelector("#room-title").textContent = connected === otherMembers.length ? "Connected" : "Connecting";
     }
 
-    const anyOpenChannel = [...peerConnections.values()].some(peer => peer.channel && peer.channel.readyState === "open");
+    const anyOpenChannel = serverId && serverId !== memberId
+        ? Boolean(peerConnections.get(serverId) && peerConnections.get(serverId).channel && peerConnections.get(serverId).channel.readyState === "open")
+        : [...peerConnections.values()].some(peer => peer.channel && peer.channel.readyState === "open");
     messageInput.disabled = !anyOpenChannel;
     sendButton.disabled = !anyOpenChannel;
     renderParticipants();
@@ -494,9 +535,26 @@ function setupDataChannel(id, channel) {
     channel.onmessage = event => {
         try {
             const message = JSON.parse(event.data);
-            if (typeof message.text === "string" && message.text.length <= 4000) {
+            if (message.type !== "chat" && !serverId && typeof message.text === "string") {
                 appendMessage(message.text, false, participantLabel(id));
+                return;
             }
+            if (message.type !== "chat" || typeof message.text !== "string" || message.text.length > 4000) {
+                throw new Error("Received an invalid chat message.");
+            }
+            const senderId = message.senderId;
+            if (!members.has(senderId)) {
+                throw new Error("Received a chat message from an unknown device.");
+            }
+            if (serverId === memberId) {
+                if (senderId !== id) throw new Error("A device sent a chat message for another device.");
+                appendMessage(message.text, false, participantLabel(senderId));
+                relayChatMessage(senderId, message.text, id);
+                return;
+            }
+            if (serverId && id !== serverId) return;
+            if (!serverId && senderId !== id) throw new Error("A device sent a chat message for another device.");
+            appendMessage(message.text, senderId === memberId, senderId === memberId ? "You" : participantLabel(senderId));
         } catch {
             showConnectionError(new Error("Received an invalid message from another device."));
         }
@@ -603,10 +661,12 @@ function reconcileMembers(roster) {
         }
     }
     members = nextMembers;
+    if (serverId && !members.has(serverId)) serverId = null;
     for (const member of members.values()) {
         if (member.id !== memberId) ensurePeer(member);
     }
     renderMediaTiles();
+    updateServerControls();
     updateConnectionStatus();
 }
 
@@ -618,6 +678,7 @@ async function pollLoop() {
                 query: `&room=${encodeURIComponent(currentRoom)}&after=${pollCursor}`
             });
             if (!polling || roomCode !== currentRoom) return;
+            serverId = result.serverId || null;
             reconcileMembers(result.members);
             for (const event of result.events) {
                 try {
@@ -674,12 +735,15 @@ function sendMessage(event) {
     event.preventDefault();
     const text = messageInput.value.trim();
     if (!text) return;
-    const openChannels = [...peerConnections.values()]
-        .map(peer => peer.channel)
-        .filter(channel => channel && channel.readyState === "open");
+    const targetPeer = serverId && serverId !== memberId ? peerConnections.get(serverId) : null;
+    const openChannels = targetPeer
+        ? targetPeer.channel && targetPeer.channel.readyState === "open" ? [targetPeer.channel] : []
+        : [...peerConnections.values()]
+            .map(peer => peer.channel)
+            .filter(channel => channel && channel.readyState === "open");
     if (openChannels.length === 0) return;
 
-    const payload = JSON.stringify({ text });
+    const payload = JSON.stringify({ type: "chat", senderId: memberId, text });
     let sent = 0;
     for (const channel of openChannels) {
         try {
@@ -694,10 +758,30 @@ function sendMessage(event) {
         messageInput.value = "";
         messageInput.focus();
     }
+    const expectedRecipients = serverId === memberId ? members.size - 1 : openChannels.length;
     if (sent === 0) {
         showConnectionError(new Error("Message could not be sent to any device."));
-    } else if (sent < openChannels.length) {
-        showConnectionError(new Error(`Message sent to ${sent} of ${openChannels.length} connected devices.`));
+    } else if (sent < expectedRecipients) {
+        showConnectionError(new Error(`Message sent to ${sent} of ${expectedRecipients} other devices.`));
+    }
+}
+
+function relayChatMessage(senderId, text, excludedMemberId) {
+    const recipients = [...members.keys()].filter(id => id !== memberId && id !== excludedMemberId);
+    let sent = 0;
+    const payload = JSON.stringify({ type: "chat", senderId, text });
+    for (const id of recipients) {
+        const channel = peerConnections.get(id)?.channel;
+        if (!channel || channel.readyState !== "open") continue;
+        try {
+            channel.send(payload);
+            sent++;
+        } catch {
+            continue;
+        }
+    }
+    if (sent < recipients.length) {
+        showConnectionError(new Error(`Chat relay reached ${sent} of ${recipients.length} other devices.`));
     }
 }
 
@@ -734,6 +818,7 @@ async function leaveRoom() {
     token = "";
     memberId = "";
     memberOrder = 0;
+    serverId = null;
     members.clear();
     welcome.hidden = false;
     connection.hidden = true;
@@ -751,6 +836,7 @@ document.querySelector("#message-form").addEventListener("submit", sendMessage);
 document.querySelector("#open-room-menu").addEventListener("click", () => roomMenu.showModal());
 document.querySelector("#close-room-menu").addEventListener("click", () => roomMenu.close());
 document.querySelector("#leave-room").addEventListener("click", leaveRoom);
+serverButton.addEventListener("click", setServerRole);
 toggleAudioButton.addEventListener("click", () => toggleLocalMedia("audio"));
 toggleVideoButton.addEventListener("click", () => toggleLocalMedia("video"));
 document.querySelector("#copy-code").addEventListener("click", async event => {
