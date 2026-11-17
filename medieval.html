@@ -103,6 +103,18 @@
                     <p id="server-status" class="server-status" role="status">No Server is selected.</p>
                     <button id="toggle-server" class="button button-secondary" type="button">Make this device the Server</button>
                 </section>
+                <section class="server-setting" aria-label="Shared JSON data">
+                    <p class="eyebrow">SHARED JSON DATA</p>
+                    <p class="server-status">Send one update or an array of updates. Newer timestamps replace older values for the same key.</p>
+                    <form id="json-data-form">
+                        <label for="json-data-input">Update JSON</label>
+                        <textarea id="json-data-input" rows="5" maxlength="20000" placeholder='{"key":"status","timestamp":1730000000000,"value":{"ready":true}}' required></textarea>
+                        <button class="button button-secondary" type="submit">Send JSON update</button>
+                    </form>
+                    <p id="json-data-error" class="error" role="alert" hidden></p>
+                    <label for="json-data-output">Merged room data</label>
+                    <pre id="json-data-output" class="json-data-output">[]</pre>
+                </section>
                 <div class="room-menu-actions">
                     <button id="leave-room" class="button button-danger" type="button" title="When clicked the room will be deleted">Close room</button>
                 </div>
