@@ -6,6 +6,8 @@ const MEMBER_TTL = 300;
 const MAX_ROOM_MEMBERS = 6;
 const MAX_SIGNAL_EVENTS = 1200;
 const MAX_SDP_LENGTH = 20000;
+const MAX_ROOM_DATA_BYTES = 65536;
+const MAX_DATA_UPDATES = 100;
 
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
@@ -100,6 +102,13 @@ function withRoom(string $code, string $tokenHash, callable $callback, bool $all
         flock($file, LOCK_UN);
         fclose($file);
         respond(410, ['error' => 'This room was created by an older version. Create a new room to continue.']);
+    }
+    if (!array_key_exists('data', $room)) {
+        $room['data'] = [];
+    } elseif (!is_array($room['data'])) {
+        flock($file, LOCK_UN);
+        fclose($file);
+        respond(410, ['error' => 'This room contains invalid shared data. Create a new room to continue.']);
     }
     if (time() - (int)$room['updated'] > ROOM_TTL) {
         flock($file, LOCK_UN);
@@ -215,6 +224,7 @@ if ($action === 'create' && $method === 'POST') {
             'updated' => time(),
             'nextId' => 1,
             'events' => [],
+            'data' => [],
             'serverId' => null,
             'nextMemberOrder' => 2,
             'members' => [
@@ -281,8 +291,61 @@ if ($action === 'events' && $method === 'GET') {
         }
         return [
             'status' => 200,
-            'body' => ['members' => $members, 'events' => $events, 'cursor' => $room['nextId'] - 1, 'serverId' => $room['serverId'] ?? null]
+            'body' => ['members' => $members, 'events' => $events, 'data' => $room['data'], 'cursor' => $room['nextId'] - 1, 'serverId' => $room['serverId'] ?? null]
         ];
+    });
+}
+
+if ($action === 'data' && $method === 'POST') {
+    $code = roomCode($_GET['room'] ?? null);
+    $tokenHash = bearerToken();
+    $body = requestBody();
+    $updates = $body['updates'] ?? null;
+    if (!is_array($updates) || count($updates) < 1 || count($updates) > MAX_DATA_UPDATES) {
+        respond(400, ['error' => 'Provide between 1 and 100 JSON data updates.']);
+    }
+    foreach ($updates as $update) {
+        if (!is_array($update)
+            || !is_string($update['key'] ?? null)
+            || !preg_match('/^[A-Za-z0-9._:-]{1,128}$/', $update['key'])
+            || (!is_int($update['timestamp'] ?? null) && !is_float($update['timestamp'] ?? null))
+            || !is_finite((float)$update['timestamp'])
+            || $update['timestamp'] < 0
+            || !array_key_exists('value', $update)) {
+            respond(400, ['error' => 'Each update must have a valid key, non-negative numeric timestamp, and JSON value.']);
+        }
+    }
+    withRoom($code, $tokenHash, static function (array &$room, ?string $memberId) use ($updates): array {
+        if ($memberId === null) {
+            return ['status' => 403, 'body' => ['error' => 'This device is not authorized for the room.']];
+        }
+        $mergedData = $room['data'];
+        $accepted = 0;
+        foreach ($updates as $update) {
+            $existingIndex = null;
+            foreach ($mergedData as $index => $record) {
+                if (($record['key'] ?? null) === $update['key']) {
+                    $existingIndex = $index;
+                    break;
+                }
+            }
+            if ($existingIndex !== null && $update['timestamp'] <= $mergedData[$existingIndex]['timestamp']) {
+                continue;
+            }
+            $record = ['key' => $update['key'], 'timestamp' => $update['timestamp'], 'value' => $update['value']];
+            if ($existingIndex === null) {
+                $mergedData[] = $record;
+            } else {
+                $mergedData[$existingIndex] = $record;
+            }
+            $accepted++;
+        }
+        $encodedData = json_encode($mergedData, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+        if ($encodedData === false || strlen($encodedData) > MAX_ROOM_DATA_BYTES) {
+            return ['status' => 413, 'body' => ['error' => 'The merged room data exceeds the 64 KiB limit.']];
+        }
+        $room['data'] = $mergedData;
+        return ['status' => 200, 'body' => ['accepted' => $accepted, 'data' => $mergedData]];
     });
 }
 

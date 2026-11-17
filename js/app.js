@@ -23,6 +23,10 @@ const messageInput = document.querySelector("#message-input");
 const sendButton = document.querySelector("#send-message");
 const serverStatus = document.querySelector("#server-status");
 const serverButton = document.querySelector("#toggle-server");
+const jsonDataForm = document.querySelector("#json-data-form");
+const jsonDataInput = document.querySelector("#json-data-input");
+const jsonDataOutput = document.querySelector("#json-data-output");
+const jsonDataError = document.querySelector("#json-data-error");
 
 const peerConnections = new Map();
 const localTracks = { audio: null, video: null };
@@ -105,6 +109,9 @@ function enterRoom(result) {
     serverId = result.serverId || null;
     members = new Map([[memberId, { id: memberId, order: memberOrder }]]);
     messages.replaceChildren();
+    jsonDataOutput.textContent = "[]";
+    jsonDataInput.value = "";
+    clearError(jsonDataError);
     peerConnections.clear();
     remoteMuted.clear();
     mediaTiles.clear();
@@ -679,6 +686,7 @@ async function pollLoop() {
             });
             if (!polling || roomCode !== currentRoom) return;
             serverId = result.serverId || null;
+            renderRoomData(result.data);
             reconcileMembers(result.members);
             for (const event of result.events) {
                 try {
@@ -729,6 +737,37 @@ function appendMessage(text, own, sender) {
     bubble.append(label, content);
     messages.append(bubble);
     messages.scrollTop = messages.scrollHeight;
+}
+
+function renderRoomData(data) {
+    const formattedData = JSON.stringify(data, null, 2);
+    if (formattedData !== jsonDataOutput.textContent) {
+        jsonDataOutput.textContent = formattedData;
+    }
+}
+
+async function sendJsonData(event) {
+    event.preventDefault();
+    clearError(jsonDataError);
+    let updates;
+    try {
+        const parsed = JSON.parse(jsonDataInput.value);
+        updates = Array.isArray(parsed) ? parsed : [parsed];
+    } catch {
+        showError(jsonDataError, "Enter valid JSON.");
+        return;
+    }
+    try {
+        const result = await api("data", {
+            method: "POST",
+            query: `&room=${encodeURIComponent(roomCode)}`,
+            body: { updates }
+        });
+        renderRoomData(result.data);
+        jsonDataInput.value = "";
+    } catch (error) {
+        showError(jsonDataError, error.message);
+    }
 }
 
 function sendMessage(event) {
@@ -833,6 +872,7 @@ async function leaveRoom() {
 document.querySelector("#create-room").addEventListener("click", createRoom);
 document.querySelector("#join-form").addEventListener("submit", joinRoom);
 document.querySelector("#message-form").addEventListener("submit", sendMessage);
+jsonDataForm.addEventListener("submit", sendJsonData);
 document.querySelector("#open-room-menu").addEventListener("click", () => roomMenu.showModal());
 document.querySelector("#close-room-menu").addEventListener("click", () => roomMenu.close());
 document.querySelector("#leave-room").addEventListener("click", leaveRoom);
