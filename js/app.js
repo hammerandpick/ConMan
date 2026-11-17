@@ -27,6 +27,18 @@ const jsonDataForm = document.querySelector("#json-data-form");
 const jsonDataInput = document.querySelector("#json-data-input");
 const jsonDataOutput = document.querySelector("#json-data-output");
 const jsonDataError = document.querySelector("#json-data-error");
+const jsonDataStatus = document.querySelector("#json-data-status");
+const savedJsonHistory = document.querySelector("#saved-json-history");
+const savedJsonList = document.querySelector("#saved-json-list");
+const importJsonFile = document.querySelector("#import-json-file");
+
+const ROOM_AUTOSAVE_PREFIX = "conman:room-autosave:";
+const MAX_ROOM_DATA_BYTES = 64 * 1024;
+const MAX_DATA_CHANNEL_MESSAGE_BYTES = 64 * 1024;
+const DATA_BATCH_TARGET_BYTES = 48 * 1024;
+const ROOM_AUTOSAVE_INTERVAL = 5 * 60 * 1000;
+const DATA_COORDINATOR_HEARTBEAT_INTERVAL = 5 * 1000;
+const DATA_COORDINATOR_TIMEOUT = 30 * 1000;
 
 const peerConnections = new Map();
 const localTracks = { audio: null, video: null };
@@ -41,8 +53,17 @@ let pollCursor = 0;
 let polling = false;
 let members = new Map();
 let serverId = null;
+let dataCoordinatorId = null;
+let coordinatorLastHeartbeatAt = 0;
+let lastCoordinatorHeartbeatSentAt = 0;
+let coordinatorHeartbeatTimer = null;
+let coordinatorHealthTimer = null;
+let coordinatorFailoverPending = false;
+let nextCoordinatorFailoverAttemptAt = 0;
 let localMediaStream = null;
 let roomEpoch = 0;
+let mergedRoomData = [];
+let roomAutosaveTimer = null;
 
 function showError(element, message) {
     element.textContent = message;
@@ -65,6 +86,14 @@ async function api(action, options = {}) {
         cache: "no-store"
     });
     const result = await response.json();
+    if (roomCode && Array.isArray(result.legacyData)) {
+        try {
+            const accepted = mergeRoomData(result.legacyData);
+            if (accepted > 0 && memberId === getDataCoordinatorId()) broadcastRoomDataState();
+        } catch (error) {
+            showError(jsonDataError, `Could not migrate data from the old server-stored room data: ${error.message}`);
+        }
+    }
     if (!response.ok) {
         const error = new Error(result.error || "The server could not complete that request.");
         error.status = response.status;
@@ -107,11 +136,27 @@ function enterRoom(result) {
     memberOrder = result.memberOrder;
     pollCursor = result.cursor;
     serverId = result.serverId || null;
+    dataCoordinatorId = result.dataCoordinatorId || serverId || memberId;
+    coordinatorLastHeartbeatAt = Date.now();
     members = new Map([[memberId, { id: memberId, order: memberOrder }]]);
-    messages.replaceChildren();
-    jsonDataOutput.textContent = "[]";
-    jsonDataInput.value = "";
     clearError(jsonDataError);
+    jsonDataStatus.textContent = "";
+    try {
+        mergedRoomData = loadLocalRoomData(roomCode);
+    } catch (error) {
+        mergedRoomData = [];
+        showError(jsonDataError, `Could not restore data saved on this device: ${error.message}`);
+    }
+    if (Array.isArray(result.legacyData)) {
+        try {
+            mergeRoomData(result.legacyData);
+        } catch (error) {
+            showError(jsonDataError, `Could not migrate data from the old server-stored room data: ${error.message}`);
+        }
+    }
+    messages.replaceChildren();
+    renderRoomData(mergedRoomData);
+    jsonDataInput.value = "";
     peerConnections.clear();
     remoteMuted.clear();
     mediaTiles.clear();
@@ -129,6 +174,8 @@ function enterRoom(result) {
     updateMediaControls();
     updateConnectionStatus();
     polling = true;
+    startRoomAutosave();
+    startCoordinatorMonitoring();
     pollLoop();
 }
 
@@ -203,18 +250,31 @@ function renderParticipants() {
 }
 
 function updateServerControls() {
+    const dataCoordinatorId = getDataCoordinatorId();
+    const coordinatorDescription = dataCoordinatorId
+        ? `${participantLabel(dataCoordinatorId)} merges shared JSON data${dataCoordinatorId !== (serverId || getLowestOrderMemberId()) ? " after automatic failover" : ""}.`
+        : "No device is currently available to merge shared JSON data.";
     if (!serverId) {
-        serverStatus.textContent = "No Server is selected. Chat is sent directly between devices.";
+        serverStatus.textContent = `No Server is selected. Chat is sent directly; ${coordinatorDescription}`;
     } else if (serverId === memberId) {
-        serverStatus.textContent = "This device is the Server and relays chat to the other devices.";
+        serverStatus.textContent = `This device is the Server and relays chat; ${coordinatorDescription}`;
     } else {
-        serverStatus.textContent = `${participantLabel(serverId)} is the Server and relays chat.`;
+        serverStatus.textContent = `${participantLabel(serverId)} is the Server and relays chat; ${coordinatorDescription}`;
     }
     serverButton.textContent = serverId === memberId ? "Stop being Server" : "Make this device the Server";
     serverButton.disabled = serverId !== null && serverId !== memberId;
 }
 
+function getLowestOrderMemberId() {
+    let lowestOrderMember = null;
+    for (const member of members.values()) {
+        if (!lowestOrderMember || member.order < lowestOrderMember.order) lowestOrderMember = member;
+    }
+    return lowestOrderMember ? lowestOrderMember.id : null;
+}
+
 async function setServerRole() {
+    const previousCoordinatorId = getDataCoordinatorId();
     const enabled = serverId !== memberId;
     serverButton.disabled = true;
     try {
@@ -224,9 +284,14 @@ async function setServerRole() {
             body: { enabled }
         });
         serverId = result.serverId || null;
+        updateDataCoordinator(result.dataCoordinatorId || serverId || getLowestOrderMemberId());
         updateServerControls();
         renderParticipants();
         updateConnectionStatus();
+        if (getDataCoordinatorId() !== previousCoordinatorId) {
+            coordinatorLastHeartbeatAt = Date.now();
+            synchronizeRoomData();
+        }
     } catch (error) {
         showConnectionError(error);
     } finally {
@@ -537,7 +602,10 @@ function setupDataChannel(id, channel) {
     const peer = peerConnections.get(id);
     if (!peer || peer.channel === channel) return;
     peer.channel = channel;
-    channel.onopen = updateConnectionStatus;
+    channel.onopen = () => {
+        updateConnectionStatus();
+        synchronizeRoomDataWithPeer(id);
+    };
     channel.onclose = updateConnectionStatus;
     channel.onmessage = event => {
         try {
@@ -546,7 +614,11 @@ function setupDataChannel(id, channel) {
                 appendMessage(message.text, false, participantLabel(id));
                 return;
             }
-            if (message.type !== "chat" || typeof message.text !== "string" || message.text.length > 4000) {
+            if (message.type !== "chat") {
+                handleRoomDataChannelMessage(id, message);
+                return;
+            }
+            if (typeof message.text !== "string" || message.text.length > 4000) {
                 throw new Error("Received an invalid chat message.");
             }
             const senderId = message.senderId;
@@ -567,6 +639,7 @@ function setupDataChannel(id, channel) {
         }
     };
     updateConnectionStatus();
+    if (channel.readyState === "open") synchronizeRoomDataWithPeer(id);
 }
 
 function adoptRemoteTransceivers(peer) {
@@ -677,6 +750,88 @@ function reconcileMembers(roster) {
     updateConnectionStatus();
 }
 
+function getDataCoordinatorId() {
+    if (dataCoordinatorId) return dataCoordinatorId;
+    if (serverId && members.has(serverId)) return serverId;
+    return getLowestOrderMemberId();
+}
+
+function updateDataCoordinator(coordinatorId) {
+    const nextCoordinatorId = typeof coordinatorId === "string" ? coordinatorId : null;
+    if (dataCoordinatorId !== nextCoordinatorId) {
+        dataCoordinatorId = nextCoordinatorId;
+        coordinatorLastHeartbeatAt = Date.now();
+        lastCoordinatorHeartbeatSentAt = 0;
+        coordinatorFailoverPending = false;
+        nextCoordinatorFailoverAttemptAt = 0;
+    }
+}
+
+function startCoordinatorMonitoring() {
+    stopCoordinatorMonitoring();
+    broadcastCoordinatorHeartbeat();
+    coordinatorHeartbeatTimer = setInterval(broadcastCoordinatorHeartbeat, DATA_COORDINATOR_HEARTBEAT_INTERVAL);
+    coordinatorHealthTimer = setInterval(checkCoordinatorHealth, 1000);
+}
+
+function stopCoordinatorMonitoring() {
+    if (coordinatorHeartbeatTimer !== null) {
+        clearInterval(coordinatorHeartbeatTimer);
+        coordinatorHeartbeatTimer = null;
+    }
+    if (coordinatorHealthTimer !== null) {
+        clearInterval(coordinatorHealthTimer);
+        coordinatorHealthTimer = null;
+    }
+}
+
+function broadcastCoordinatorHeartbeat() {
+    if (getDataCoordinatorId() !== memberId) return;
+    const now = Date.now();
+    if (now - lastCoordinatorHeartbeatSentAt < DATA_COORDINATOR_HEARTBEAT_INTERVAL) return;
+    lastCoordinatorHeartbeatSentAt = now;
+    coordinatorLastHeartbeatAt = now;
+    for (const id of members.keys()) {
+        if (id === memberId) continue;
+        const peer = peerConnections.get(id);
+        if (!peer || !peer.channel || peer.channel.readyState !== "open") continue;
+        try {
+            sendRoomDataMessage(id, { type: "room-data-heartbeat", senderId: memberId });
+        } catch (error) {
+            showConnectionError(error);
+        }
+    }
+}
+
+function checkCoordinatorHealth() {
+    const coordinatorId = getDataCoordinatorId();
+    if (!coordinatorId || coordinatorId === memberId) return;
+    if (!coordinatorLastHeartbeatAt) coordinatorLastHeartbeatAt = Date.now();
+    if (Date.now() - coordinatorLastHeartbeatAt < DATA_COORDINATOR_TIMEOUT
+        || coordinatorFailoverPending || Date.now() < nextCoordinatorFailoverAttemptAt) return;
+
+    coordinatorFailoverPending = true;
+    api("coordinator-failover", {
+        method: "POST",
+        query: `&room=${encodeURIComponent(roomCode)}`,
+        body: { coordinatorId }
+    }).then(result => {
+        const previousCoordinatorId = getDataCoordinatorId();
+        updateDataCoordinator(result.dataCoordinatorId || null);
+        if (getDataCoordinatorId() === previousCoordinatorId) {
+            coordinatorLastHeartbeatAt = Date.now();
+            nextCoordinatorFailoverAttemptAt = Date.now() + 5000;
+        }
+        updateServerControls();
+        if (getDataCoordinatorId() !== previousCoordinatorId) synchronizeRoomData();
+    }).catch(error => {
+        nextCoordinatorFailoverAttemptAt = Date.now() + 5000;
+        showConnectionError(error);
+    }).finally(() => {
+        coordinatorFailoverPending = false;
+    });
+}
+
 async function pollLoop() {
     const currentRoom = roomCode;
     while (polling && roomCode === currentRoom) {
@@ -685,9 +840,11 @@ async function pollLoop() {
                 query: `&room=${encodeURIComponent(currentRoom)}&after=${pollCursor}`
             });
             if (!polling || roomCode !== currentRoom) return;
+            const previousCoordinatorId = getDataCoordinatorId();
             serverId = result.serverId || null;
-            renderRoomData(result.data);
+            updateDataCoordinator(result.dataCoordinatorId || null);
             reconcileMembers(result.members);
+            if (getDataCoordinatorId() !== previousCoordinatorId) synchronizeRoomData();
             for (const event of result.events) {
                 try {
                     await handleSignal(event);
@@ -696,11 +853,39 @@ async function pollLoop() {
                 }
             }
             pollCursor = result.cursor;
+            broadcastCoordinatorHeartbeat();
+            checkCoordinatorHealth();
         } catch (error) {
             if (polling && roomCode === currentRoom) {
                 setStatus(error.message);
+                if (error.status === 403) {
+                    saveRoomDataLocally(false);
+                    polling = false;
+                    stopRoomAutosave();
+                    stopCoordinatorMonitoring();
+                    roomEpoch++;
+                    closePeerConnections();
+                    stopLocalMedia();
+                    members.clear();
+                    roomCodeInput.value = currentRoom;
+                    roomCode = "";
+                    token = "";
+                    memberId = "";
+                    memberOrder = 0;
+                    serverId = null;
+                    dataCoordinatorId = null;
+                    connection.hidden = true;
+                    welcome.hidden = false;
+                    document.querySelector(".shell").classList.remove("has-room");
+                    renderParticipants();
+                    clearError(connectionError);
+                    showError(entryError, "This device was removed after 5 minutes of inactivity. Rejoin using the room code.");
+                    return;
+                }
                 if (error.status === 404 || error.status === 410) {
                     polling = false;
+                    stopRoomAutosave();
+                    stopCoordinatorMonitoring();
                     roomEpoch++;
                     closePeerConnections();
                     members = new Map();
@@ -746,6 +931,423 @@ function renderRoomData(data) {
     }
 }
 
+const SAVED_DATA_KEY = "conman:saved-data";
+const LEGACY_ROOM_DATA_PREFIX = "conman:merged-data:";
+
+function getMergedDataForExport() {
+    return JSON.stringify(JSON.parse(jsonDataOutput.textContent), null, 2);
+}
+
+function getSerializedByteLength(value) {
+    return new Blob([JSON.stringify(value)]).size;
+}
+
+function validateMergedData(data) {
+    if (!Array.isArray(data)) {
+        throw new Error("The imported JSON must be an array of merged data records.");
+    }
+    for (const record of data) {
+        if (!record || typeof record !== "object" || Array.isArray(record)
+            || typeof record.key !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(record.key)
+            || typeof record.timestamp !== "number" || !Number.isFinite(record.timestamp) || record.timestamp < 0
+            || !Object.prototype.hasOwnProperty.call(record, "value")) {
+            throw new Error("Each record must have a valid key, non-negative numeric timestamp, and value.");
+        }
+    }
+    if (getSerializedByteLength(data) > MAX_ROOM_DATA_BYTES) {
+        throw new Error("Merged room data cannot exceed 64 KiB.");
+    }
+    return data;
+}
+
+function validateSavedSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)
+        || typeof snapshot.room !== "string"
+        || typeof snapshot.savedAt !== "number" || !Number.isFinite(snapshot.savedAt) || snapshot.savedAt < 0) {
+        throw new Error("Saved browser data has an invalid snapshot format.");
+    }
+    return {
+        room: snapshot.room,
+        savedAt: snapshot.savedAt,
+        data: validateMergedData(snapshot.data),
+        legacyKey: typeof snapshot.legacyKey === "string" ? snapshot.legacyKey : null,
+        autoKey: typeof snapshot.autoKey === "string" ? snapshot.autoKey : null
+    };
+}
+
+function latestRecordTimestamp(data) {
+    return data.reduce((latest, record) => latest === null || record.timestamp > latest ? record.timestamp : latest, null);
+}
+
+function readSavedSnapshots() {
+    const storedSnapshots = localStorage.getItem(SAVED_DATA_KEY);
+    const snapshots = storedSnapshots === null ? [] : JSON.parse(storedSnapshots);
+    if (!Array.isArray(snapshots)) {
+        throw new Error("Saved browser data has an invalid snapshot list.");
+    }
+    const validatedSnapshots = snapshots.map(validateSavedSnapshot);
+    const knownLegacyKeys = new Set(validatedSnapshots.map(snapshot => snapshot.legacyKey).filter(Boolean));
+    const knownAutoKeys = new Set(validatedSnapshots.map(snapshot => snapshot.autoKey).filter(Boolean));
+    const legacySnapshots = [];
+    const autoSnapshots = [];
+
+    for (let index = 0; index < localStorage.length; index++) {
+        const key = localStorage.key(index);
+        if (!key) continue;
+        if (key.startsWith(LEGACY_ROOM_DATA_PREFIX) && !knownLegacyKeys.has(key)) {
+            const data = validateMergedData(JSON.parse(localStorage.getItem(key)));
+            legacySnapshots.push({
+                room: key.slice(LEGACY_ROOM_DATA_PREFIX.length),
+                savedAt: latestRecordTimestamp(data) ?? 0,
+                data,
+                legacyKey: key
+            });
+        } else if (key.startsWith(ROOM_AUTOSAVE_PREFIX) && !knownAutoKeys.has(key)) {
+            const autosave = JSON.parse(localStorage.getItem(key));
+            if (!autosave || typeof autosave !== "object"
+                || typeof autosave.savedAt !== "number" || !Number.isFinite(autosave.savedAt) || autosave.savedAt < 0) {
+                throw new Error("An automatic browser save has an invalid snapshot format.");
+            }
+            autoSnapshots.push({
+                room: key.slice(ROOM_AUTOSAVE_PREFIX.length),
+                savedAt: autosave.savedAt,
+                data: validateMergedData(autosave.data),
+                autoKey: key
+            });
+        }
+    }
+
+    return [...validatedSnapshots, ...legacySnapshots, ...autoSnapshots].sort((a, b) => b.savedAt - a.savedAt);
+}
+
+function loadLocalRoomData(code) {
+    const autosave = localStorage.getItem(`${ROOM_AUTOSAVE_PREFIX}${code}`);
+    if (autosave !== null) {
+        const snapshot = JSON.parse(autosave);
+        if (!snapshot || typeof snapshot !== "object"
+            || typeof snapshot.savedAt !== "number" || !Number.isFinite(snapshot.savedAt) || snapshot.savedAt < 0) {
+            throw new Error("The automatic save has an invalid snapshot format.");
+        }
+        return validateMergedData(snapshot.data);
+    }
+
+    const existing = readSavedSnapshots().find(snapshot => snapshot.room === code);
+    return existing ? existing.data : [];
+}
+
+function renderSavedSnapshots(snapshots) {
+    savedJsonList.replaceChildren();
+    savedJsonHistory.hidden = false;
+    if (snapshots.length === 0) {
+        const emptyItem = document.createElement("li");
+        emptyItem.textContent = "No saved data is available in this browser.";
+        savedJsonList.append(emptyItem);
+        return;
+    }
+
+    for (const snapshot of snapshots) {
+        const item = document.createElement("li");
+        const heading = document.createElement("div");
+        heading.className = "saved-json-heading";
+        const summary = document.createElement("span");
+        const timestamp = snapshot.legacyKey ? latestRecordTimestamp(snapshot.data) : snapshot.savedAt;
+        const date = timestamp === null ? null : new Date(timestamp);
+        const dateText = !date || Number.isNaN(date.getTime()) ? "date unavailable" : date.toLocaleString();
+        const dateLabel = snapshot.autoKey
+            ? `Auto-saved ${dateText}`
+            : snapshot.legacyKey ? `Latest update ${dateText}` : `Saved ${dateText}`;
+        summary.textContent = `Room ${snapshot.room || "unknown"} · ${dateLabel} · ${snapshot.data.length} ${snapshot.data.length === 1 ? "record" : "records"}`;
+
+        const importButton = document.createElement("button");
+        importButton.className = "button button-secondary";
+        importButton.type = "button";
+        importButton.textContent = "Import to this room";
+        importButton.addEventListener("click", () => importMergedDataText(JSON.stringify(snapshot.data)));
+        heading.append(summary, importButton);
+
+        const details = document.createElement("details");
+        const detailsSummary = document.createElement("summary");
+        detailsSummary.textContent = "View saved records";
+        const preview = document.createElement("pre");
+        preview.className = "saved-json-preview";
+        preview.textContent = JSON.stringify(snapshot.data, null, 2);
+        details.append(detailsSummary, preview);
+        item.append(heading, details);
+        savedJsonList.append(item);
+    }
+}
+
+function saveRoomDataLocally(showStatus) {
+    if (!roomCode) return;
+    try {
+        localStorage.setItem(`${ROOM_AUTOSAVE_PREFIX}${roomCode}`, JSON.stringify({
+            savedAt: Date.now(),
+            data: mergedRoomData
+        }));
+        if (showStatus) jsonDataStatus.textContent = "Room data was automatically saved on this device.";
+    } catch (error) {
+        showError(jsonDataError, `Automatic local save failed: ${error.message}`);
+    }
+}
+
+function startRoomAutosave() {
+    stopRoomAutosave();
+    saveRoomDataLocally(false);
+    roomAutosaveTimer = setInterval(() => saveRoomDataLocally(true), ROOM_AUTOSAVE_INTERVAL);
+}
+
+function stopRoomAutosave() {
+    if (roomAutosaveTimer !== null) {
+        clearInterval(roomAutosaveTimer);
+        roomAutosaveTimer = null;
+    }
+}
+
+function mergeRoomData(updates) {
+    validateMergedData(updates);
+    const byKey = new Map(mergedRoomData.map(record => [record.key, record]));
+    let accepted = 0;
+    for (const update of updates) {
+        const existing = byKey.get(update.key);
+        if (existing && update.timestamp <= existing.timestamp) continue;
+        byKey.set(update.key, { key: update.key, timestamp: update.timestamp, value: update.value });
+        accepted++;
+    }
+    const merged = [...byKey.values()];
+    if (getSerializedByteLength(merged) > MAX_ROOM_DATA_BYTES) {
+        throw new Error("Merged room data cannot exceed 64 KiB.");
+    }
+    if (accepted > 0) {
+        mergedRoomData = merged;
+        renderRoomData(mergedRoomData);
+        saveRoomDataLocally(false);
+    }
+    return accepted;
+}
+
+function splitDataRecords(records, messageType, fieldName) {
+    const batches = [];
+    let batch = [];
+    for (const record of records) {
+        const nextBatch = [...batch, record];
+        const message = { type: messageType, senderId: memberId, [fieldName]: nextBatch };
+        if (getSerializedByteLength(message) > DATA_BATCH_TARGET_BYTES && batch.length > 0) {
+            batches.push(batch);
+            batch = [record];
+        } else {
+            batch = nextBatch;
+        }
+        const singleMessage = { type: messageType, senderId: memberId, [fieldName]: batch };
+        if (getSerializedByteLength(singleMessage) > MAX_DATA_CHANNEL_MESSAGE_BYTES) {
+            throw new Error("A JSON data record is too large to send to the other devices.");
+        }
+    }
+    if (batch.length > 0 || batches.length === 0) batches.push(batch);
+    return batches;
+}
+
+function sendRoomDataMessage(id, message) {
+    const peer = peerConnections.get(id);
+    if (!peer || !peer.channel || peer.channel.readyState !== "open") {
+        throw new Error(`${participantLabel(id)} is not connected for data sharing.`);
+    }
+    const serialized = JSON.stringify(message);
+    if (new Blob([serialized]).size > MAX_DATA_CHANNEL_MESSAGE_BYTES) {
+        throw new Error("The JSON data message is too large to send.");
+    }
+    peer.channel.send(serialized);
+}
+
+function sendRoomDataState(id) {
+    const batches = splitDataRecords(mergedRoomData, "room-data-state", "records");
+    for (const records of batches) {
+        sendRoomDataMessage(id, { type: "room-data-state", senderId: memberId, records });
+    }
+}
+
+function sendRoomDataUpdates(id, updates) {
+    const batches = splitDataRecords(updates, "room-data-update", "updates");
+    for (const batch of batches) {
+        sendRoomDataMessage(id, { type: "room-data-update", senderId: memberId, updates: batch });
+    }
+}
+
+function synchronizeRoomDataWithPeer(id) {
+    const coordinatorId = getDataCoordinatorId();
+    if (!coordinatorId || (memberId !== coordinatorId && id !== coordinatorId)) return;
+    try {
+        sendRoomDataMessage(id, { type: "room-data-sync-request", senderId: memberId });
+        sendRoomDataState(id);
+    } catch (error) {
+        showConnectionError(error);
+    }
+}
+
+function synchronizeRoomData() {
+    const coordinatorId = getDataCoordinatorId();
+    if (!coordinatorId) return;
+    for (const id of members.keys()) {
+        if (id === memberId || (memberId !== coordinatorId && id !== coordinatorId)) continue;
+        const peer = peerConnections.get(id);
+        if (!peer || !peer.channel || peer.channel.readyState !== "open") continue;
+        try {
+            sendRoomDataMessage(id, { type: "room-data-sync-request", senderId: memberId });
+            sendRoomDataState(id);
+        } catch (error) {
+            showConnectionError(error);
+        }
+    }
+}
+
+function broadcastRoomDataState() {
+    for (const id of members.keys()) {
+        if (id === memberId) continue;
+        const peer = peerConnections.get(id);
+        if (!peer || !peer.channel || peer.channel.readyState !== "open") continue;
+        try {
+            sendRoomDataState(id);
+        } catch (error) {
+            showConnectionError(error);
+        }
+    }
+}
+
+function handleRoomDataChannelMessage(id, message) {
+    if (!members.has(id) || message.senderId !== id) {
+        throw new Error("Received JSON data from an unknown device.");
+    }
+    const coordinatorId = getDataCoordinatorId();
+    if (message.type === "room-data-heartbeat") {
+        if (id === coordinatorId) coordinatorLastHeartbeatAt = Date.now();
+    } else if (message.type === "room-data-sync-request") {
+        if (memberId === coordinatorId || id === coordinatorId) sendRoomDataState(id);
+    } else if (message.type === "room-data-state") {
+        const records = validateMergedData(message.records);
+        if (memberId === coordinatorId) {
+            if (mergeRoomData(records) > 0) broadcastRoomDataState();
+            else sendRoomDataState(id);
+        } else if (id === coordinatorId) {
+            mergeRoomData(records);
+        } else {
+            throw new Error("Received merged JSON data from a non-coordinator device.");
+        }
+    } else if (message.type === "room-data-update") {
+        if (memberId !== coordinatorId) throw new Error("A JSON update was sent to a non-coordinator device.");
+        const accepted = mergeRoomData(message.updates);
+        if (accepted > 0) broadcastRoomDataState();
+        sendRoomDataMessage(id, { type: "room-data-ack", senderId: memberId, accepted });
+    } else if (message.type === "room-data-ack") {
+        if (id !== coordinatorId || !Number.isInteger(message.accepted) || message.accepted < 0) {
+            throw new Error("Received an invalid JSON data acknowledgement.");
+        }
+        jsonDataStatus.textContent = "The coordinator processed this data batch; the merged room data is shown above.";
+    } else {
+        throw new Error("Received an unknown data-sharing message.");
+    }
+}
+
+function importMergedData(data) {
+    const records = validateMergedData(data);
+    if (records.length === 0) {
+        jsonDataStatus.textContent = "No records to import; room data was not changed.";
+        return;
+    }
+    const coordinatorId = getDataCoordinatorId();
+    if (!coordinatorId) throw new Error("There is no available device to merge room data.");
+    if (coordinatorId === memberId) {
+        const accepted = mergeRoomData(records);
+        if (accepted > 0) broadcastRoomDataState();
+        jsonDataStatus.textContent = accepted > 0
+            ? `Merged ${accepted} new or newer ${accepted === 1 ? "record" : "records"} on this device.`
+            : "No imported records were newer than the room data.";
+        return;
+    }
+    sendRoomDataUpdates(coordinatorId, records);
+    jsonDataStatus.textContent = `Sent ${records.length} ${records.length === 1 ? "record" : "records"} to ${participantLabel(coordinatorId)} for merging.`;
+}
+
+async function importMergedDataText(text) {
+    clearError(jsonDataError);
+    jsonDataStatus.textContent = "";
+    try {
+        await importMergedData(JSON.parse(text));
+    } catch (error) {
+        showError(jsonDataError, error.message);
+    }
+}
+
+function saveMergedDataToLocalStorage() {
+    clearError(jsonDataError);
+    jsonDataStatus.textContent = "";
+    try {
+        const snapshots = readSavedSnapshots().filter(snapshot => !snapshot.autoKey);
+        const legacyKeys = snapshots.map(snapshot => snapshot.legacyKey).filter(Boolean);
+        snapshots.push({
+            room: roomCode,
+            savedAt: Date.now(),
+            data: JSON.parse(getMergedDataForExport())
+        });
+        snapshots.sort((a, b) => b.savedAt - a.savedAt);
+        localStorage.setItem(SAVED_DATA_KEY, JSON.stringify(snapshots));
+        for (const key of legacyKeys) localStorage.removeItem(key);
+        renderSavedSnapshots(readSavedSnapshots());
+        jsonDataStatus.textContent = "Merged room data saved in this browser.";
+    } catch (error) {
+        showError(jsonDataError, `Could not save data in browser storage: ${error.message}`);
+    }
+}
+
+async function loadMergedDataFromLocalStorage() {
+    clearError(jsonDataError);
+    jsonDataStatus.textContent = "";
+    try {
+        const snapshots = readSavedSnapshots();
+        renderSavedSnapshots(snapshots);
+        jsonDataStatus.textContent = `Showing ${snapshots.length} saved ${snapshots.length === 1 ? "snapshot" : "snapshots"}, newest first.`;
+    } catch (error) {
+        showError(jsonDataError, `Could not read browser storage: ${error.message}`);
+    }
+}
+
+async function exportMergedDataToFile() {
+    clearError(jsonDataError);
+    jsonDataStatus.textContent = "";
+    const content = getMergedDataForExport();
+    const fileName = `conman-${roomCode}-merged-data.json`;
+    try {
+        if (typeof window.showSaveFilePicker === "function") {
+            const fileHandle = await window.showSaveFilePicker({
+                suggestedName: fileName,
+                types: [{ description: "JSON file", accept: { "application/json": [".json"] } }]
+            });
+            const writable = await fileHandle.createWritable();
+            await writable.write(content);
+            await writable.close();
+        } else {
+            const fileUrl = URL.createObjectURL(new Blob([content], { type: "application/json" }));
+            const link = document.createElement("a");
+            link.href = fileUrl;
+            link.download = fileName;
+            link.click();
+            setTimeout(() => URL.revokeObjectURL(fileUrl), 1000);
+        }
+        jsonDataStatus.textContent = "Merged room data exported to a JSON file.";
+    } catch (error) {
+        showError(jsonDataError, `Could not export the JSON file: ${error.message}`);
+    }
+}
+
+async function handleMergedDataFileImport() {
+    const file = importJsonFile.files[0];
+    importJsonFile.value = "";
+    if (!file) return;
+    try {
+        await importMergedDataText(await file.text());
+    } catch (error) {
+        showError(jsonDataError, `Could not read the selected file: ${error.message}`);
+    }
+}
+
 async function sendJsonData(event) {
     event.preventDefault();
     clearError(jsonDataError);
@@ -758,12 +1360,7 @@ async function sendJsonData(event) {
         return;
     }
     try {
-        const result = await api("data", {
-            method: "POST",
-            query: `&room=${encodeURIComponent(roomCode)}`,
-            body: { updates }
-        });
-        renderRoomData(result.data);
+        importMergedData(updates);
         jsonDataInput.value = "";
     } catch (error) {
         showError(jsonDataError, error.message);
@@ -843,6 +1440,9 @@ function closePeerConnections() {
 
 async function leaveRoom() {
     polling = false;
+    saveRoomDataLocally(false);
+    stopRoomAutosave();
+    stopCoordinatorMonitoring();
     roomEpoch++;
     if (roomMenu.open) roomMenu.close();
     closePeerConnections();
@@ -858,6 +1458,7 @@ async function leaveRoom() {
     memberId = "";
     memberOrder = 0;
     serverId = null;
+    dataCoordinatorId = null;
     members.clear();
     welcome.hidden = false;
     connection.hidden = true;
@@ -876,6 +1477,11 @@ jsonDataForm.addEventListener("submit", sendJsonData);
 document.querySelector("#open-room-menu").addEventListener("click", () => roomMenu.showModal());
 document.querySelector("#close-room-menu").addEventListener("click", () => roomMenu.close());
 document.querySelector("#leave-room").addEventListener("click", leaveRoom);
+document.querySelector("#save-json-local").addEventListener("click", saveMergedDataToLocalStorage);
+document.querySelector("#load-json-local").addEventListener("click", loadMergedDataFromLocalStorage);
+document.querySelector("#export-json-file").addEventListener("click", exportMergedDataToFile);
+document.querySelector("#import-json-file-button").addEventListener("click", () => importJsonFile.click());
+importJsonFile.addEventListener("change", handleMergedDataFileImport);
 serverButton.addEventListener("click", setServerRole);
 toggleAudioButton.addEventListener("click", () => toggleLocalMedia("audio"));
 toggleVideoButton.addEventListener("click", () => toggleLocalMedia("video"));

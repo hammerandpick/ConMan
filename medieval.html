@@ -7,7 +7,7 @@
     <title>ConMan — connect your devices</title>
     <link rel="stylesheet" href="./css/theme-medieval/styles.css">
     <script src="./js/qr.js" defer></script>
-    <script src="./js/app.js" defer></script>
+    <script src="./js/app.js?v=9" defer></script>
 </head>
 <body>
     <main class="shell">
@@ -105,7 +105,7 @@
                 </section>
                 <section class="server-setting" aria-label="Shared JSON data">
                     <p class="eyebrow">SHARED JSON DATA</p>
-                    <p class="server-status">Send one update or an array of updates. Newer timestamps replace older values for the same key.</p>
+                    <p class="server-status">The selected Server merges updates; otherwise the lowest-numbered device does. If the coordinator is unreachable for 30 seconds, the next available higher-numbered device takes over. Newer timestamps replace older values. Data is shared peer-to-peer and saved locally on each device every five minutes.</p>
                     <form id="json-data-form">
                         <label for="json-data-input">Update JSON</label>
                         <textarea id="json-data-input" rows="5" maxlength="20000" placeholder='{"key":"status","timestamp":1730000000000,"value":{"ready":true}}' required></textarea>
@@ -114,6 +114,17 @@
                     <p id="json-data-error" class="error" role="alert" hidden></p>
                     <label for="json-data-output">Merged room data</label>
                     <pre id="json-data-output" class="json-data-output">[]</pre>
+                    <div class="json-data-actions">
+                        <button id="save-json-local" class="button button-secondary" type="button">Save to this device</button>
+                        <button id="load-json-local" class="button button-secondary" type="button">Show saved data</button>
+                        <button id="export-json-file" class="button button-secondary" type="button">Export JSON file</button>
+                        <button id="import-json-file-button" class="button button-secondary" type="button">Import JSON file</button>
+                        <input id="import-json-file" type="file" accept=".json,application/json" hidden>
+                    </div>
+                    <div id="saved-json-history" class="saved-json-history" hidden>
+                        <ul id="saved-json-list" class="saved-json-list" aria-label="Saved data snapshots"></ul>
+                    </div>
+                    <p id="json-data-status" class="server-status" role="status" aria-live="polite"></p>
                 </section>
                 <div class="room-menu-actions">
                     <button id="leave-room" class="button button-danger" type="button" title="When clicked the room will be deleted">Close room</button>
