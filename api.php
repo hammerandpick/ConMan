@@ -6,8 +6,7 @@ const MEMBER_TTL = 300;
 const MAX_ROOM_MEMBERS = 6;
 const MAX_SIGNAL_EVENTS = 1200;
 const MAX_SDP_LENGTH = 20000;
-const MAX_ROOM_DATA_BYTES = 65536;
-const MAX_DATA_UPDATES = 100;
+const DATA_COORDINATOR_TIMEOUT = 30;
 
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
@@ -53,23 +52,79 @@ function bearerToken(): string
 function roomPath(string $code): string
 {
     /*
-     * The room data is stored in a JSON file named after the room code.
-     * The storage directory is not web-accessible and is created if it does not exist.
-     * 
-     * this function validates the room code and returns the full path to the corresponding JSON file.
-     * If the room code is invalid, it responds with a 400 error.
+     * Room metadata is stored in a JSON file named after the room code.
+     * Shared JSON data is exchanged between devices and is not persisted here.
      */
-    if(roomCode($code) !== $code) {
+    if (roomCode($code) !== $code) {
         respond(400, ['error' => 'Invalid room code.']);
     }
     return __DIR__ . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'rooms' . DIRECTORY_SEPARATOR . $code . '.json';
+}
+
+function firstAvailableCoordinatorId(array $room, int $now): ?string
+{
+    $available = [];
+    foreach ($room['members'] as $id => $member) {
+        if ($now - (int)$member['lastSeen'] <= DATA_COORDINATOR_TIMEOUT) {
+            $available[$id] = (int)$member['order'];
+        }
+    }
+    if ($available === []) {
+        return null;
+    }
+    asort($available, SORT_NUMERIC);
+    if (isset($room['serverId'], $available[$room['serverId']])) {
+        return (string)$room['serverId'];
+    }
+    return (string)array_key_first($available);
+}
+
+function nextAvailableCoordinatorId(array $room, int $afterOrder, int $now): ?string
+{
+    $available = [];
+    foreach ($room['members'] as $id => $member) {
+        if ($now - (int)$member['lastSeen'] <= DATA_COORDINATOR_TIMEOUT) {
+            $available[$id] = (int)$member['order'];
+        }
+    }
+    if ($available === []) {
+        return null;
+    }
+    asort($available, SORT_NUMERIC);
+    foreach ($available as $id => $order) {
+        if ($order > $afterOrder) {
+            return (string)$id;
+        }
+    }
+    return (string)array_key_first($available);
+}
+
+function refreshDataCoordinator(array &$room, int $now): void
+{
+    $coordinatorId = $room['dataCoordinatorId'] ?? null;
+    $coordinatorOrder = (int)($room['dataCoordinatorOrder'] ?? 0);
+    if (is_string($coordinatorId) && isset($room['members'][$coordinatorId])) {
+        $coordinatorOrder = (int)$room['members'][$coordinatorId]['order'];
+        if ($now - (int)$room['members'][$coordinatorId]['lastSeen'] <= DATA_COORDINATOR_TIMEOUT) {
+            return;
+        }
+    }
+
+    $nextCoordinatorId = nextAvailableCoordinatorId($room, $coordinatorOrder, $now);
+    if ($nextCoordinatorId === null) {
+        $nextCoordinatorId = firstAvailableCoordinatorId($room, $now);
+    }
+    $room['dataCoordinatorId'] = $nextCoordinatorId;
+    $room['dataCoordinatorOrder'] = $nextCoordinatorId === null
+        ? null
+        : (int)$room['members'][$nextCoordinatorId]['order'];
 }
 
 function saveRoom($file, array $room): void
 {
     $json = json_encode($room, JSON_UNESCAPED_SLASHES);
     if ($json === false || ftruncate($file, 0) === false || rewind($file) === false || fwrite($file, $json) === false || fflush($file) === false) {
-        error_log('ConMan could not persist room data.');
+        error_log('ConMan could not persist room metadata.');
         respond(500, ['error' => 'The room could not be saved.']);
     }
 }
@@ -92,7 +147,7 @@ function withRoom(string $code, string $tokenHash, callable $callback, bool $all
     }
     if (!flock($file, LOCK_EX)) {
         fclose($file);
-        error_log('ConMan could not lock room data.');
+        error_log('ConMan could not lock room metadata.');
         respond(503, ['error' => 'The room is temporarily unavailable.']);
     }
 
@@ -103,12 +158,14 @@ function withRoom(string $code, string $tokenHash, callable $callback, bool $all
         fclose($file);
         respond(410, ['error' => 'This room was created by an older version. Create a new room to continue.']);
     }
-    if (!array_key_exists('data', $room)) {
-        $room['data'] = [];
-    } elseif (!is_array($room['data'])) {
-        flock($file, LOCK_UN);
-        fclose($file);
-        respond(410, ['error' => 'This room contains invalid shared data. Create a new room to continue.']);
+    $legacyData = null;
+    if (array_key_exists('data', $room)) {
+        if (is_array($room['data'])) {
+            $legacyData = $room['data'];
+        } else {
+            error_log('ConMan discarded invalid legacy room JSON data.');
+        }
+        unset($room['data']);
     }
     if (time() - (int)$room['updated'] > ROOM_TTL) {
         flock($file, LOCK_UN);
@@ -132,21 +189,11 @@ function withRoom(string $code, string $tokenHash, callable $callback, bool $all
     }
 
     $now = time();
-    $ownerGone = false;
     foreach ($room['members'] as $candidateId => $member) {
         if ($candidateId === $memberId || $now - (int)$member['lastSeen'] <= MEMBER_TTL) {
             continue;
         }
-        if ((int)$member['order'] === 1) {
-            $ownerGone = true;
-        }
         unset($room['members'][$candidateId]);
-    }
-    if ($ownerGone) {
-        flock($file, LOCK_UN);
-        fclose($file);
-        @unlink($path);
-        respond(410, ['error' => 'The room creator is no longer connected. Create a new room to continue.']);
     }
     if (!isset($room['members'][$room['serverId'] ?? ''])) {
         $room['serverId'] = null;
@@ -159,6 +206,13 @@ function withRoom(string $code, string $tokenHash, callable $callback, bool $all
     if ($memberId !== null) {
         $room['members'][$memberId]['lastSeen'] = $now;
     }
+    if (!array_key_exists('dataCoordinatorId', $room)) {
+        $room['dataCoordinatorId'] = firstAvailableCoordinatorId($room, $now);
+        $room['dataCoordinatorOrder'] = $room['dataCoordinatorId'] === null
+            ? null
+            : (int)$room['members'][$room['dataCoordinatorId']]['order'];
+    }
+    refreshDataCoordinator($room, $now);
 
     $result = $callback($room, $memberId, $file, $path);
     if (!is_array($result) || !isset($result['status'], $result['body'])) {
@@ -166,6 +220,9 @@ function withRoom(string $code, string $tokenHash, callable $callback, bool $all
         fclose($file);
         error_log('ConMan room handler returned an invalid response.');
         respond(500, ['error' => 'The room request failed.']);
+    }
+    if ($legacyData !== null) {
+        $result['body']['legacyData'] = $legacyData;
     }
     if (($result['save'] ?? true) === true) {
         $room['updated'] = time();
@@ -214,7 +271,7 @@ if ($action === 'create' && $method === 'POST') {
         if (!flock($file, LOCK_EX)) {
             fclose($file);
             @unlink($path);
-            error_log('ConMan could not lock new room data.');
+            error_log('ConMan could not lock new room metadata.');
             respond(503, ['error' => 'Could not create a room. Please try again.']);
         }
         $token = bin2hex(random_bytes(32));
@@ -224,8 +281,9 @@ if ($action === 'create' && $method === 'POST') {
             'updated' => time(),
             'nextId' => 1,
             'events' => [],
-            'data' => [],
             'serverId' => null,
+            'dataCoordinatorId' => $memberId,
+            'dataCoordinatorOrder' => 1,
             'nextMemberOrder' => 2,
             'members' => [
                 $memberId => [
@@ -239,7 +297,15 @@ if ($action === 'create' && $method === 'POST') {
         saveRoom($file, $room);
         flock($file, LOCK_UN);
         fclose($file);
-        respond(201, ['room' => $code, 'token' => $token, 'memberId' => $memberId, 'memberOrder' => 1, 'cursor' => 0]);
+        respond(201, [
+            'room' => $code,
+            'token' => $token,
+            'memberId' => $memberId,
+            'memberOrder' => 1,
+            'cursor' => 0,
+            'serverId' => null,
+            'dataCoordinatorId' => $memberId
+        ]);
     }
     respond(503, ['error' => 'Could not allocate a room. Please try again.']);
 }
@@ -263,7 +329,15 @@ if ($action === 'join' && $method === 'POST') {
         ];
         return [
             'status' => 200,
-            'body' => ['room' => $code, 'token' => $token, 'memberId' => $memberId, 'memberOrder' => $order, 'cursor' => $cursor]
+            'body' => [
+                'room' => $code,
+                'token' => $token,
+                'memberId' => $memberId,
+                'memberOrder' => $order,
+                'cursor' => $cursor,
+                'serverId' => $room['serverId'] ?? null,
+                'dataCoordinatorId' => $room['dataCoordinatorId'] ?? null
+            ]
         ];
     }, true);
 }
@@ -291,61 +365,14 @@ if ($action === 'events' && $method === 'GET') {
         }
         return [
             'status' => 200,
-            'body' => ['members' => $members, 'events' => $events, 'data' => $room['data'], 'cursor' => $room['nextId'] - 1, 'serverId' => $room['serverId'] ?? null]
+            'body' => [
+                'members' => $members,
+                'events' => $events,
+                'cursor' => $room['nextId'] - 1,
+                'serverId' => $room['serverId'] ?? null,
+                'dataCoordinatorId' => $room['dataCoordinatorId'] ?? null
+            ]
         ];
-    });
-}
-
-if ($action === 'data' && $method === 'POST') {
-    $code = roomCode($_GET['room'] ?? null);
-    $tokenHash = bearerToken();
-    $body = requestBody();
-    $updates = $body['updates'] ?? null;
-    if (!is_array($updates) || count($updates) < 1 || count($updates) > MAX_DATA_UPDATES) {
-        respond(400, ['error' => 'Provide between 1 and 100 JSON data updates.']);
-    }
-    foreach ($updates as $update) {
-        if (!is_array($update)
-            || !is_string($update['key'] ?? null)
-            || !preg_match('/^[A-Za-z0-9._:-]{1,128}$/', $update['key'])
-            || (!is_int($update['timestamp'] ?? null) && !is_float($update['timestamp'] ?? null))
-            || !is_finite((float)$update['timestamp'])
-            || $update['timestamp'] < 0
-            || !array_key_exists('value', $update)) {
-            respond(400, ['error' => 'Each update must have a valid key, non-negative numeric timestamp, and JSON value.']);
-        }
-    }
-    withRoom($code, $tokenHash, static function (array &$room, ?string $memberId) use ($updates): array {
-        if ($memberId === null) {
-            return ['status' => 403, 'body' => ['error' => 'This device is not authorized for the room.']];
-        }
-        $mergedData = $room['data'];
-        $accepted = 0;
-        foreach ($updates as $update) {
-            $existingIndex = null;
-            foreach ($mergedData as $index => $record) {
-                if (($record['key'] ?? null) === $update['key']) {
-                    $existingIndex = $index;
-                    break;
-                }
-            }
-            if ($existingIndex !== null && $update['timestamp'] <= $mergedData[$existingIndex]['timestamp']) {
-                continue;
-            }
-            $record = ['key' => $update['key'], 'timestamp' => $update['timestamp'], 'value' => $update['value']];
-            if ($existingIndex === null) {
-                $mergedData[] = $record;
-            } else {
-                $mergedData[$existingIndex] = $record;
-            }
-            $accepted++;
-        }
-        $encodedData = json_encode($mergedData, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
-        if ($encodedData === false || strlen($encodedData) > MAX_ROOM_DATA_BYTES) {
-            return ['status' => 413, 'body' => ['error' => 'The merged room data exceeds the 64 KiB limit.']];
-        }
-        $room['data'] = $mergedData;
-        return ['status' => 200, 'body' => ['accepted' => $accepted, 'data' => $mergedData]];
     });
 }
 
@@ -366,10 +393,51 @@ if ($action === 'server' && $method === 'POST') {
                 return ['status' => 409, 'body' => ['error' => 'Another device is already the Server. Stop its Server role before choosing a new one.']];
             }
             $room['serverId'] = $memberId;
+            $room['dataCoordinatorId'] = $memberId;
+            $room['dataCoordinatorOrder'] = (int)$room['members'][$memberId]['order'];
         } elseif ($serverId === $memberId) {
             $room['serverId'] = null;
+            $room['dataCoordinatorId'] = firstAvailableCoordinatorId($room, time());
+            $room['dataCoordinatorOrder'] = $room['dataCoordinatorId'] === null
+                ? null
+                : (int)$room['members'][$room['dataCoordinatorId']]['order'];
         }
-        return ['status' => 200, 'body' => ['serverId' => $room['serverId'] ?? null]];
+        return [
+            'status' => 200,
+            'body' => [
+                'serverId' => $room['serverId'] ?? null,
+                'dataCoordinatorId' => $room['dataCoordinatorId'] ?? null
+            ]
+        ];
+    });
+}
+
+if ($action === 'coordinator-failover' && $method === 'POST') {
+    $code = roomCode($_GET['room'] ?? null);
+    $tokenHash = bearerToken();
+    $body = requestBody();
+    $expectedCoordinatorId = $body['coordinatorId'] ?? null;
+    if (!is_string($expectedCoordinatorId) || !preg_match('/^[a-f0-9]{16}$/', $expectedCoordinatorId)) {
+        respond(400, ['error' => 'Invalid data coordinator.']);
+    }
+    withRoom($code, $tokenHash, static function (array &$room, ?string $memberId) use ($expectedCoordinatorId): array {
+        if ($memberId === null) {
+            return ['status' => 403, 'body' => ['error' => 'This device is not authorized for the room.']];
+        }
+        $currentCoordinatorId = $room['dataCoordinatorId'] ?? null;
+        if ($currentCoordinatorId === $expectedCoordinatorId) {
+            $currentOrder = (int)($room['dataCoordinatorOrder'] ?? 0);
+            $nextCoordinatorId = nextAvailableCoordinatorId($room, $currentOrder, time());
+            if ($nextCoordinatorId === null || $nextCoordinatorId === $currentCoordinatorId) {
+                return ['status' => 409, 'body' => ['error' => 'No other available device can coordinate JSON data.']];
+            }
+            $room['dataCoordinatorId'] = $nextCoordinatorId;
+            $room['dataCoordinatorOrder'] = (int)$room['members'][$nextCoordinatorId]['order'];
+        }
+        return [
+            'status' => 200,
+            'body' => ['dataCoordinatorId' => $room['dataCoordinatorId'] ?? null]
+        ];
     });
 }
 

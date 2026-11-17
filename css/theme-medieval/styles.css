@@ -183,6 +183,15 @@ input::placeholder { color: #75859a; }
 .server-status { color: var(--muted); font-size: 12px; line-height: 1.5; }
 #json-data-form { display: grid; gap: 8px; }
 #json-data-input { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #3a4b60; border-radius: 10px; background: #0b1220; color: #eef3fb; font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; resize: vertical; }
+.json-data-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.json-data-actions .button { flex: 1 1 150px; }
+.saved-json-history[hidden] { display: none; }
+.saved-json-list { display: grid; max-height: 260px; gap: 8px; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.saved-json-list > li { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: #0b1220; color: var(--muted); font-size: 12px; }
+.saved-json-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.saved-json-heading .button { flex: 0 0 auto; min-height: 36px; padding: 0 10px; font-size: 11px; }
+.saved-json-list details > summary { cursor: pointer; }
+.saved-json-preview { max-height: 120px; margin: 8px 0 0; padding: 8px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: #111b29; font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .json-data-output { max-height: 180px; margin: 0; padding: 10px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; background: #0b1220; color: #b6c4d5; font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .room-menu-actions { display: flex; justify-content: flex-end; margin-top: 16px; }
 .button-danger { border-color: #70464d; background: #432b31; color: #ffc0c4; }
