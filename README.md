@@ -1,6 +1,6 @@
 # ConMan
 
-ConMan, short form of ConnectionManager, is a small PHP signaling service and browser app for connecting a computer and phones or other devices. A room code pairs up to six browsers in a peer-to-peer mesh; WebRTC carries messages, audio, and video directly between each pair. The PHP server only relays the connection setup messages.
+ConMan, short form of ConnectionManager, is a small PHP signaling service and browser app for connecting a computer and phones or other devices. A room code pairs up to six browsers in a peer-to-peer mesh; WebRTC carries audio and video directly between each pair, and an optional Server device can relay room chat. The PHP server only relays connection setup messages.
 
 ## Requirements
 
@@ -22,8 +22,9 @@ Open `http://127.0.0.1:8000` on the computer. To test a phone, deploy behind HTT
 
 1. Select **Create a room** on one device.
 2. Share the displayed QR code or eight-character code with up to five other devices.
-3. Scan the QR code to open ConMan and join automatically, or enter the code manually. Once connected, messages and enabled media are sent directly to the other devices in the room.
-4. Open **Room menu** to view the QR invite and room ID, copy either, or leave. If the room creator leaves, the room closes for everyone.
+3. Scan the QR code to open ConMan and join automatically, or enter the code manually. Once connected, messages use the selected chat route and enabled media is sent directly to the other devices in the room.
+4. Optionally, open **Room menu** and make one device the **Server**. That device relays room chat to the other devices; it must stay connected for chat relay to work. Only one device can be the Server at a time. With no Server selected, chat is sent directly between devices.
+5. Open **Room menu** to view the QR invite and room ID, copy either, or leave. If the room creator leaves, the room closes for everyone.
 
 Rooms admit up to six devices. Every pair of devices creates its own WebRTC connection, so each device maintains at most five peer connections. Microphone and camera are off until enabled; the browser asks for permission when you turn one on. Audio from other devices starts muted and can be unmuted individually in the device list. Enabling or disabling media renegotiates the affected peer connections so each device can send and receive independently. Room codes expire after two hours without activity; devices that stop polling are removed after five minutes. Messages and media travel through encrypted peer-to-peer connections and are not stored by the PHP service; signaling metadata is temporarily stored in `storage/rooms`. This mesh is intended for small groups: bandwidth and connection load increase as devices join.
 

@@ -23,7 +23,7 @@
         <section id="welcome" class="card">
             <p class="eyebrow">CONNECT YOUR DEVICES</p>
             <h2>Share a connection, not an account.</h2>
-            <p class="intro">Create a room and invite up to five more devices by code or QR. Messages travel directly between every pair.</p>
+            <p class="intro">Create a room and invite up to five more devices by code or QR. Choose a Server device to relay room chat.</p>
             <button id="create-room" class="button button-primary" type="button">Create a room</button>
             <div class="divider"><span>or join a room</span></div>
             <form id="join-form" class="join-form">
@@ -98,6 +98,11 @@
                         <button id="copy-invite-link" class="button button-secondary" type="button">Copy invite link</button>
                         <p id="invite-warning" class="invite-warning" role="status" hidden></p>
                     </div>
+                </section>
+                <section class="server-setting" aria-label="Chat relay Server">
+                    <p class="eyebrow">CHAT RELAY</p>
+                    <p id="server-status" class="server-status" role="status">No Server is selected.</p>
+                    <button id="toggle-server" class="button button-secondary" type="button">Make this device the Server</button>
                 </section>
                 <div class="room-menu-actions">
                     <button id="leave-room" class="button button-danger" type="button" title="When clicked the room will be deleted">Close room</button>

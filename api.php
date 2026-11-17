@@ -139,6 +139,9 @@ function withRoom(string $code, string $tokenHash, callable $callback, bool $all
         @unlink($path);
         respond(410, ['error' => 'The room creator is no longer connected. Create a new room to continue.']);
     }
+    if (!isset($room['members'][$room['serverId'] ?? ''])) {
+        $room['serverId'] = null;
+    }
     $activeMembers = array_fill_keys(array_keys($room['members']), true);
     $room['events'] = array_values(array_filter(
         $room['events'],
@@ -212,6 +215,7 @@ if ($action === 'create' && $method === 'POST') {
             'updated' => time(),
             'nextId' => 1,
             'events' => [],
+            'serverId' => null,
             'nextMemberOrder' => 2,
             'members' => [
                 $memberId => [
@@ -277,8 +281,32 @@ if ($action === 'events' && $method === 'GET') {
         }
         return [
             'status' => 200,
-            'body' => ['members' => $members, 'events' => $events, 'cursor' => $room['nextId'] - 1]
+            'body' => ['members' => $members, 'events' => $events, 'cursor' => $room['nextId'] - 1, 'serverId' => $room['serverId'] ?? null]
         ];
+    });
+}
+
+if ($action === 'server' && $method === 'POST') {
+    $code = roomCode($_GET['room'] ?? null);
+    $tokenHash = bearerToken();
+    $body = requestBody();
+    if (!is_bool($body['enabled'] ?? null)) {
+        respond(400, ['error' => 'Invalid Server setting.']);
+    }
+    withRoom($code, $tokenHash, static function (array &$room, ?string $memberId) use ($body): array {
+        if ($memberId === null) {
+            return ['status' => 403, 'body' => ['error' => 'This device is not authorized for the room.']];
+        }
+        $serverId = $room['serverId'] ?? null;
+        if ($body['enabled']) {
+            if ($serverId !== null && $serverId !== $memberId) {
+                return ['status' => 409, 'body' => ['error' => 'Another device is already the Server. Stop its Server role before choosing a new one.']];
+            }
+            $room['serverId'] = $memberId;
+        } elseif ($serverId === $memberId) {
+            $room['serverId'] = null;
+        }
+        return ['status' => 200, 'body' => ['serverId' => $room['serverId'] ?? null]];
     });
 }
 
@@ -327,6 +355,9 @@ if ($action === 'leave' && $method === 'POST') {
         }
         if ($memberId !== null) {
             unset($room['members'][$memberId]);
+            if (($room['serverId'] ?? null) === $memberId) {
+                $room['serverId'] = null;
+            }
             $room['events'] = array_values(array_filter(
                 $room['events'],
                 static fn(array $event): bool => $event['from'] !== $memberId && $event['to'] !== $memberId
