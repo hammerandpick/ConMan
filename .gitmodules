@@ -1,0 +1,3 @@
+[submodule "games/Player206"]
+	path = games/Player206
+	url = https://github.com/hammerandpick/Player206
