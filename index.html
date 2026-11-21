@@ -24,13 +24,13 @@
             <p class="eyebrow">CONNECT YOUR DEVICES</p>
             <h2>Share a connection, not an account.</h2>
             <p class="intro">Create a room and invite up to five more devices by code or QR. Choose a Server device to relay room chat.</p>
-            <button id="create-room" class="button button-primary" type="button">Create a room</button>
+            <button id="create-room" class="button button-primary" type="button">Create a room 🏠</button>
             <div class="divider"><span>or join a room</span></div>
             <form id="join-form" class="join-form">
                 <label for="room-code">Room code</label>
                 <div class="join-controls">
                     <input id="room-code" name="room-code" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" maxlength="8" placeholder="8-character code" required>
-                    <button class="button button-secondary" type="submit">Join</button>
+                    <button class="button button-secondary" type="submit">Join 🚪</button>
                 </div>
             </form>
             <p id="entry-error" class="error" role="alert" hidden></p>
@@ -59,8 +59,8 @@
                     <img id="main-table-image" class="main-table-image" alt="Shared room content" hidden>
                 </div>
                 <div class="media-controls" aria-label="Your microphone and camera">
-                    <button id="toggle-audio" class="button button-secondary" type="button" aria-pressed="false">Enable microphone</button>
-                    <button id="toggle-video" class="button button-secondary" type="button" aria-pressed="false">Enable camera</button>
+                    <button id="toggle-audio" class="button button-secondary" type="button" aria-pressed="false">Enable microphone 🎤</button>
+                    <button id="toggle-video" class="button button-secondary" type="button" aria-pressed="false">Enable camera 📹</button>
                 </div>
                 <p class="media-help">Remote audio is muted until you unmute a device in the list.</p>
                 <div id="audio-playback" class="audio-playback" aria-hidden="true"></div>
@@ -72,7 +72,7 @@
                 <form id="message-form" class="message-form">
                     <label class="sr-only" for="message-input">Message</label>
                     <input id="message-input" name="message" type="text" maxlength="4000" placeholder="Write a message…" autocomplete="off" disabled required>
-                    <button id="send-message" class="button button-primary" type="submit" disabled>Send</button>
+                    <button id="send-message" class="button button-primary" type="submit" disabled>Send 📨</button>
                 </form>
                 <p id="connection-error" class="error" role="alert" hidden></p>
             </section>
